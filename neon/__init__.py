@@ -17,6 +17,7 @@ Nervana's deep learning library
 """
 from __future__ import print_function
 from builtins import zip
+from .decaffeinate import Decaffeinate
 
 try:
     from neon.version import VERSION as __version__  # noqa
@@ -31,10 +32,8 @@ import logging
 
 from neon.util.persist import load_class
 
-
 DISPLAY_LEVEL_NUM = 41
 logging.addLevelName(DISPLAY_LEVEL_NUM, "DISPLAY")
-
 
 def display(self, message, *args, **kwargs):
     if self.isEnabledFor(DISPLAY_LEVEL_NUM):
@@ -108,7 +107,7 @@ class NervanaObject(object):
             # the parameter list
             if type(pdict[key]) in [tuple, list]:
                 for ind, val in enumerate(pdict[key]):
-                    cls.recursive_gen(pdict[key], ind) 
+                    cls.recursive_gen(pdict[key], ind)
             else:
                 cls.recursive_gen(pdict, key)
 
