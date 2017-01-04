@@ -15,7 +15,7 @@
 # ----------------------------------------------------------------------------
 #
 # Convert Caffe model to neon format.
-#
+# 
 # First the caffe prototxt file and model are loaded up and
 # a graph of the layer configuration is generated.  Each node
 # of the graph corresponds to a caffe layer.  The graph is
@@ -23,7 +23,7 @@
 # layer type, like inception layers, are incapsulated in a single
 # node.  Finally, the neon formatted graph is serialized into a
 # pickle file that can be loaded by neon.
-#
+# 
 # To run this caffe must be on the python path
 #
 
@@ -31,6 +31,7 @@ import os
 import pickle
 import argparse
 import numpy as np
+import scipy.linalg
 from copy import deepcopy
 from google.protobuf import text_format
 from google.protobuf.internal.containers import RepeatedScalarFieldContainer
@@ -204,7 +205,7 @@ class graph():
     def check_support(self, node):
         # layers supported by neon
         SUPPORTED_LAYERS = ['InnerProduct', 'Bias', 'Dropout', 'Convolution',
-                            'Pooling', 'Data', 'ReLU', 'Concat','Softmax',
+                            'Pooling', 'Data', 'ReLU', 'Concat','Softmax', 
                             'SoftmaxWithLoss', 'LRN', 'DummyData']
 
         if node.ltype not in SUPPORTED_LAYERS:
@@ -364,7 +365,7 @@ class graph():
 
 
 class NeonNode():
-    #
+    # 
     # container for neon node which are being initialized
     # from a caffe model
     #
@@ -466,7 +467,7 @@ class NeonNode():
                 if len(node.ds_nodes) == 0:
                     break
                 node = node.ds_nodes[0]
-
+    
             newlayer.pdict['config']['layers'].append(cont)
 
         return (newlayer,)
@@ -478,22 +479,57 @@ class NeonNode():
         newlayer.pdict['config'].update(params)
         newlayer.pdict['config']['init'] = {'type': 'neon.initializers.initializer.Constant',
                                             'config': {'val': 0.0}}
+        
+        w = np.array(list(node.layer.blobs[0].data))
 
-        #for legacy array format
+        # legacy format
         if node.layer.blobs[0].HasField('num') or node.layer.blobs[0].HasField('channels') or node.layer.blobs[0].HasField('height') or node.layer.blobs[0].HasField('width'):
-            w = np.array(list(node.layer.blobs[0].data))
             num = node.layer.blobs[0].num
             channels = node.layer.blobs[0].channels
             height = node.layer.blobs[0].height
             width = node.layer.blobs[0].width
-            w = w.reshape(num, channels, height, width)
-            w = w.transpose(1,2,3,0)
-        else:
+        else: # new format
             dimc = np.array(node.layer.blobs[0].shape.dim)
-            dimn = (np.prod(dimc[1:4]), dimc[0])
-            # making it a list first seems to speed things up
-            w = np.array(list(node.layer.blobs[0].data)).reshape(dimc).transpose((1,2,3,0))  # neon ordering
-            w = w.reshape(dimn)
+            #dimn = (np.prod(dimc[1:4]), dimc[0])
+            (num, channels, height, width) = dimc
+            
+        # following caffe weight's rule, the weight's shape is (output, channels, height, width)
+        w = w.reshape(num, channels, height, width) 
+
+        #support group here
+        # group description:
+        # use a example as below:
+        # weight: num(output)=256; channels(input)=96; kernel height=5; kernel width=5;
+        #
+        # if no group:
+        # weight * input = [256, 96*5*5] * [96*5*5, 27*27] = [256, 27*27]
+        #
+        # set group as 2:
+        # group 1: weight1 * input1 = [128, 48*5*5] * [48*5*5, 27*27] = [128, 27*27]
+        # group 2: weight2 * input2 = [128, 48*5*5] * [48*5*5, 27*27] = [128, 27*27]
+        # [ weight1, 0       ]   [   input1    ]
+        # |                  | * |             |
+        # [ 0,       weight2 ]   [   input2    ]
+        #
+        # Caffe only store weight1 and weight2, so the weight is [256, 48*5*5]
+
+        if node.layer.convolution_param.HasField('group'):
+            group = node.layer.convolution_param.group
+            # print "num=", num, "; channels=", channels, "; height=", height, "; width=", width, "; group:", group
+                
+            # 1. split wight to group * [num/group, channels, height, width]
+            # in this exampel, split from (256, 48*5*5)  to 2*(128, 48*5*5)
+            splits_weight = np.split(w, group)
+                
+            # 2. enlarge the first group from (128, 48*5*5) to (256, 48*5*5) with padding 0 in the end
+            #    enlarge the second group from (128, 48*5*5) to (256. 48*5*5) with padding 0 in the begin
+            # 3. merge the 2 groups to (256, 96*5*5)
+            for x in range(0, group):
+                splits_weight[x] = splits_weight[x].reshape(num/group, channels*height*width) # ==> (128, 48*5*5)
+            w = scipy.linalg.block_diag(*splits_weight) #==> block-diagonal matrix, (256, 96*5*5)
+            w = w.reshape(num, channels*group, height, width) # ==> (256, 96, 5, 5) 
+                
+        w = w.transpose(1,2,3,0) # transpose to neon format ==> (channels, height, width, num)
 
         newlayer.pdict['params'] = {'W': np.ascontiguousarray(w.astype(np.float32))}
 
@@ -522,7 +558,7 @@ class NeonNode():
         if conv:
             assert hasattr(lparam, 'num_output') and lparam.num_output > 0
             fshape['K'] = lparam.num_output
-
+        
         padding = NeonNode.parse_size(lparam, 'pad')
         if padding[0] == padding[1]:
             padding = padding[0]
@@ -554,7 +590,7 @@ class NeonNode():
             ks = getattr(lparam, key)
             if type(ks) is int and ks > 0:
                 return [ks]*2
-
+            
             if type(ks) is list or type(ks) is RepeatedScalarFieldContainer:
                 ks = list(ks)
                 if len(ks) > 3:
@@ -584,7 +620,7 @@ class NeonNode():
             ps = getattr(lparam, key)
             if type(ps) is int:
                 return [ps]*2
-
+            
             if type(ps) is list or type(ps) is RepeatedScalarFieldContainer:
                 ps = list(ps)
                 if len(ps) > 3:
@@ -613,7 +649,7 @@ class NeonNode():
             ss = getattr(lparam, key)
             if type(ss) is int:
                 return [ss]*2
-
+            
             if type(ss) is list or type(ss) is RepeatedScalarFieldContainer:
                 ss = list(ss)
                 if len(ss) > 3:
@@ -666,7 +702,7 @@ class NeonNode():
             ipnode = NeonNode.load_from_caffe_node(ipnode)
             last_node.ds_nodes.append(ipnode[0])
             last_node = ipnode[-1]
-
+        
         return (newlayer, last_node)
 
     @classmethod
@@ -676,7 +712,7 @@ class NeonNode():
         newlayer.pdict['config']['init'] = {'type': 'neon.initializers.initializer.Constant',
                                             'config': {'val': 0.0}}
         return (newlayer,)
-
+        
     @classmethod
     def InnerProduct(cls, node):
         newlayer = cls('neon.layers.layer.Linear', name=node.name)
@@ -746,7 +782,7 @@ class NeonNode():
         newlayer.ds_nodes.append(cls.CrossEntropyMulti(node)[-1])
         last_layer = newlayer.ds_nodes[0]
         return (newlayer, last_layer)
-
+    
     @classmethod
     def CrossEntropyMulti(cls, node):
         newlayer = cls('neon.layers.layer.GeneralizedCost', name=node.name, loss_layer=True)
@@ -792,7 +828,7 @@ class Decaffeinate():
             raise NotImplementedError('Convert model def prototxt to use new caffe '
                                       'format (layer not layers) [%s]' % model_file)
 
-        # remove layers used for testing only
+        # remove layers used for testing only 
         for ind in range(len(layers)-1, -1, -1):
             l = layers[ind]
             if len(l.include) > 0:
@@ -802,10 +838,10 @@ class Decaffeinate():
         with open(param_file, 'rb') as fid:
             net_w = caffe_pb2.NetParameter()
             net_w.ParseFromString(fid.read())
-
+        
         # caffe2neon does not work with the old caffe protobuf format
         if len(net_w.layer) == 0:
-            # have had success converting old V1 format to new format by training
+            # have had success converting old V1 format to new format by training 
             # for 1 iteration and serializing
             raise NotImplementedError('caffemodel file is using the old V1LayerParameter format '
                                       'try to convert to newest format if possible')
@@ -814,7 +850,7 @@ class Decaffeinate():
         # list out the layer names
         lnames = [l.name for l in layer_params]
 
-        # loading the params this way avoids the extra layers
+        # loading the params this way avoids the extra layers 
         # in the caffemodel files (e.g. split) and avoids
         # getting the old style protobuf objects (net.layers instead of net.layer)
 
@@ -830,7 +866,7 @@ class Decaffeinate():
             if l.type.lower() in ['data', 'dummydata']:
                 data_layers.append(l.name)
 
-
+            
             try:
                 ind = lnames.index(l.name)
             except ValueError:
@@ -838,23 +874,23 @@ class Decaffeinate():
                       'not in layer parameter file'
                 print 'continuing without loading any parameters...'
                 continue
-
+            
             l.blobs.extend(net_w.layer[ind].blobs)
 
         if len(data_layers) == 0:
             print 'Found no data layers in model file'
             print 'Checking for input parameters...'
-
+            
             if input_layer != "":
                 print "Use input layer to get input parameter shape"
                 inp_shape = input_layer.input_param.shape
             elif len(self.net.input_shape) > 0:
                 print "Use net parameter to get input shape"
                 inp_shape = self.net.input_shape
-            else:
+            else: 
                 print "Can not get input shape"
                 assert (0)
-
+            
             print 'Generating dummy data layer for input'
             print 'Assuming input data blob is named "data"'
             data_layer = caffe_pb2.LayerParameter()
@@ -874,7 +910,7 @@ class Decaffeinate():
         # in the grpah to neon format
         #
         # Returns:
-        #   dict: neon formatted dictionary object which can be
+        #   dict: neon formatted dictionary object which can be 
         #         deserialized in neon to generate the model
         #
 
@@ -898,7 +934,7 @@ class Decaffeinate():
             pdict['model'] = {'type': 'neon.layers.container.Tree'}
             lwght = {}
             # assign the loss weights
-            # note that the neon and caffe terminal nodes may
+            # note that the neon and caffe terminal nodes may 
             # be in different orders so need to do this by name
             for tnode in tnodes:
                 try:
@@ -922,7 +958,7 @@ class Decaffeinate():
         pdict['model']['container'] = True
         pdict['model']['config']['name'] = 'main branch'
         pdict['model'] = self.descend_model(pdict['model'], self.neon_root)
-
+        
         # add in the layer weights, map them by name
         weights = []
         if ISTREE:
@@ -997,7 +1033,7 @@ class Decaffeinate():
         if len(dsnodes) > 1:
             # add a branch node
             self.branch_cnt += 1
-            branch_node = {'type': 'neon.layers.layer.BranchNode',
+            branch_node = {'type': 'neon.layers.layer.BranchNode', 
                            'config': {'name': 'branch_%d' % self.branch_cnt}}
 
             # will use this as the main branch
