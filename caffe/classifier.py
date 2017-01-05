@@ -7,6 +7,7 @@ import numpy as np
 
 import caffe
 
+
 class Classifier(caffe.Net):
     """
     Classifier extends Net for image class prediction
@@ -26,7 +27,6 @@ class Classifier(caffe.Net):
 
         # configure pre-processing
         in_ = self.inputs[0]
-        print self.blobs[in_]
         self.transformer = caffe.io.Transformer(
             {in_: self.blobs[in_].data.shape})
         self.transformer.set_transpose(in_, (2, 0, 1))
@@ -40,7 +40,9 @@ class Classifier(caffe.Net):
             self.transformer.set_channel_swap(in_, channel_swap)
 
         self.crop_dims = np.array(self.blobs[in_].data.shape[2:])
-        self.image_dims = self.crop_dims
+        if not image_dims:
+            image_dims = self.crop_dims
+        self.image_dims = image_dims
 
     def predict(self, inputs, oversample=True):
         """
@@ -64,14 +66,9 @@ class Classifier(caffe.Net):
                            self.image_dims[1],
                            inputs[0].shape[2]),
                           dtype=np.float32)
-        print "len(inputs)", len(inputs)
-        print "image_dims[0]", self.image_dims[0]
-        print "image_dims[1]", self.image_dims[1]
-        print "inputs[0].shape[2]", inputs[0].shape[2]
-        print "inputs[0].shape", inputs[0].shape
-        print "input_.shape", input_.shape
         for ix, in_ in enumerate(inputs):
             input_[ix] = caffe.io.resize_image(in_, self.image_dims)
+
         if oversample:
             # Generate center, corner, and mirrored crops.
             input_ = caffe.io.oversample(input_, self.crop_dims)
@@ -84,8 +81,6 @@ class Classifier(caffe.Net):
             ])
             crop = crop.astype(int)
             input_ = input_[:, crop[0]:crop[2], crop[1]:crop[3], :]
-
-        print "input_.shape", input_.shape
 
         # Classify
         caffe_in = np.zeros(np.array(input_.shape)[[0, 3, 1, 2]],
